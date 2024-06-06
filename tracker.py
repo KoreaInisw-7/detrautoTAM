@@ -38,7 +38,7 @@ class Tracker:
 
         return result
 
-    def create_mask_from_img(self, image, person_bboxes, bag_bboxes, sam_checkpoint='./saves/mobile_sam.pt', model_type='vit_t', device='0'):
+    def create_mask_from_img(self, image, yolov7_bboxes, sam_checkpoint='./saves/mobile_sam.pt', model_type='vit_t', device='0'):
         sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
         if self.device.lower() != 'cpu':
             sam.to(device=f'cuda:{device}')
@@ -46,51 +46,69 @@ class Tracker:
             sam.to(device='cpu')
         predictor = SamPredictor(sam)
         predictor.set_image(image)
+        input_boxes = torch.tensor(yolov7_bboxes, device=predictor.device)
 
-        def generate_masks(bboxes):
-            input_boxes = torch.tensor(bboxes, device=predictor.device)
-            transformed_boxes = predictor.transform.apply_boxes_torch(input_boxes, image.shape[:2])
+        transformed_boxes = predictor.transform.apply_boxes_torch(
+            input_boxes, image.shape[:2])
 
-            masks = []
-            for box in transformed_boxes:
-                mask, _, _ = predictor.predict_torch(
-                    point_coords=None,
-                    point_labels=None,
-                    boxes=box.unsqueeze(0),
-                    multimask_output=False,
-                )
-                values, counts = torch.unique(mask, return_counts=True)
-                value_count = [(v.item(), c.item()) for v, c in zip(values, counts)]
-                value_count = sorted(value_count, key=lambda x: x[1], reverse=True)
-                mask[mask != 0] = value_count[0][0] if value_count[0][0] != 0 else value_count[1][0]
-                masks.append(mask)
-            return masks
+        masks = []
 
-        person_masks = generate_masks(person_bboxes)
-        bag_masks = generate_masks(bag_bboxes)
+        for box in transformed_boxes:
+            mask, _, _ = predictor.predict_torch(
+                point_coords=None,
+                point_labels=None,
+                boxes=box.unsqueeze(0),
+                multimask_output=False,
+            )
+            values, counts = torch.unique(mask, return_counts=True)
+            value_count = [(v.item(), c.item())
+                           for v, c in zip(values, counts)]
+            value_count = sorted(value_count, key=lambda x: x[1], reverse=True)
+            mask[mask != 0] = value_count[0][0] if value_count[0][0] != 0 else value_count[1][0]
+            masks.append(mask)
 
-        # Combine masks and create a result image
-        all_masks = person_masks + bag_masks
-        result = self.masks_on_im([mask.cpu().squeeze().numpy().astype(np.uint8) for mask in all_masks], image)
+        for i, mask in enumerate(masks):
+            binary_mask = masks[i].cpu().squeeze().numpy().astype(np.uint8)
+            contours, hierarchy = cv2.findContours(
+                binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            largest_contour = max(contours, key=cv2.contourArea)
+            bbox = [int(x) for x in cv2.boundingRect(largest_contour)]
+            segmentation = largest_contour.flatten().tolist()
+            mask = segmentation
+
+            height, width, _ = image.shape
+
+            mask = np.array(mask).reshape(-1, 2)
+            mask_norm = mask / np.array([width, height])
+            xmin, ymin = mask_norm.min(axis=0)
+            xmax, ymax = mask_norm.max(axis=0)
+            bbox_norm = np.array([xmin, ymin, xmax, ymax])
+            yolo = np.concatenate([bbox_norm, mask_norm.reshape(-1)])
+
+        result = self.masks_on_im(
+            [mask.cpu().squeeze().numpy().astype(np.uint8) for mask in masks], image)
         result = result[:, :, 0]
+        
 
-        # Filter result from small segmented areas
-        if len(np.unique(result)) > len(person_bboxes) + len(bag_bboxes) + 1:
+        # Filter result from small segmented areas, if np.uniq(result) > len(yolov7bboxes)
+        if len(np.unique(result)) > len(yolov7_bboxes) + 1:
             filtered_result_values = []
-            mask_uniq_values = torch.unique(torch.tensor(result), return_counts=True)[0].tolist()
-            class_pixel_cnts = torch.unique(torch.tensor(result), return_counts=True)[1].tolist()
+            mask_uniq_values = torch.unique(torch.tensor(
+                result), return_counts=True)[0].tolist()
+            class_pixel_cnts = torch.unique(torch.tensor(
+                result), return_counts=True)[1].tolist()
             sorted_indices = np.argsort(class_pixel_cnts)[::-1].tolist()
 
             for index in sorted_indices:
                 filtered_result_values.append(mask_uniq_values[index])
-                if len(filtered_result_values) == len(person_bboxes) + len(bag_bboxes) + 1:
+                if len(filtered_result_values) == len(yolov7_bboxes) + 1:
                     break
 
             for pixel_val in mask_uniq_values:
                 if pixel_val not in filtered_result_values:
                     result[result == pixel_val] = 0
 
-        return result, person_masks, bag_masks
+        return result
 
     def masks_to_boxes_with_ids(self, mask_tensor: torch.Tensor) -> torch.Tensor:
         unique_values = torch.unique(mask_tensor[mask_tensor != 0])
