@@ -10,3 +10,7 @@ yolo_every = 30 <br>
 
 frames_to_propagate = 600 <br>
 -> 몇 프레임까지 진행할 건지, 이 숫자가 짧으면 영상이 짤린다.
+
+
+$env:KMP_DUPLICATE_LIB_OK="TRUE"
+python tracking.py --video_path=C:\\deeplearning\\AutoTrackAnything\\dataset\\two.mp4 --width=960 --height=540 --frames_to_propagate=600 --output_video_path=C:\\deeplearning\\AutoTrackAnything\\result\\result.mp4 --device=0 --person_conf=0.6 --iou_thresh=0.15 --yolo_every=2 --output_path=C:\\deeplearning\\AutoTrackAnything\\result\\OUTPUT_CSV_PATH.csv
